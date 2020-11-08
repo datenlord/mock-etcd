@@ -63,6 +63,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      - run: sudo apt install -y cmake g++ libprotobuf-dev protobuf-compiler
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:

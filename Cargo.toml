@@ -1,0 +1,24 @@
+[package]
+name = "mock_etcd_service"
+version = "0.1.0"
+authors = ["Zheng Pan <zhengpan@google.com>"]
+edition = "2018"
+keywords = ["etcd"]
+repository = "https://github.com/datenlord/mock_etcd_service"
+description = "mock etcd service"
+license = "MIT"
+categories = ["storage"]
+
+[dependencies]
+anyhow = "1.0.31"
+futures = "0.3.5"
+grpcio = { version = "0.6.0", default-features = false, features = ["protobuf-codec"] }
+log = "0.4.11"
+#lockfree-cuckoohash = {git = "https://github.com/datenlord/lockfree-cuckoohash"}
+protobuf = "2.16.2"
+smol = "0.1.11"
+
+
+
+[build-dependencies]
+protoc-grpcio = "2.0.0"
