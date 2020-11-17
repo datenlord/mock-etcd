@@ -73,7 +73,7 @@ mod kv;
     clippy::nursery,
     clippy::cargo
 )]
-mod rpc;
+mod etcd;
 // Ignore format and lint to generated code
 #[rustfmt::skip]
 #[allow(
@@ -84,6 +84,6 @@ mod rpc;
     clippy::nursery,
     clippy::cargo
 )]
-mod rpc_grpc;
-/// Mock etcd service
-pub mod mock_etcd_service;
+mod etcd_grpc;
+/// Mock etcd
+pub mod mock_etcd;
