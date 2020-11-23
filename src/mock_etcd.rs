@@ -1,20 +1,26 @@
-//use futures::lock::Mutex;
-use async_lock::RwLock;
-use std::sync::Arc;
-//use lockfree_cuckoohash::LockFreeCuckooHash;
 use super::etcd::{
     CompactionRequest, CompactionResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
     PutResponse, RangeRequest, RangeResponse, TxnRequest, TxnResponse,
 };
 use super::etcd_grpc::Kv;
 use super::kv::KeyValue;
+use async_lock::RwLock;
 use futures::future::TryFutureExt;
 use futures::prelude::*;
 use grpcio::{RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use log::{debug, error};
 use protobuf::RepeatedField;
 use std::collections::HashMap;
+use std::sync::Arc;
 use utilities::Cast;
+
+/// Help function to send success `gRPC` response
+async fn success<R: Send>(response: R, sink: UnarySink<R>) {
+    sink.success(response)
+        .map_err(|e| error!("failed to send response, the error is: {:?}", e))
+        .map(|_| ())
+        .await
+}
 
 /// Send failure `gRPC` response
 fn fail<R>(ctx: &RpcContext, sink: UnarySink<R>, rsc: RpcStatusCode, details: String) {
@@ -26,7 +32,7 @@ fn fail<R>(ctx: &RpcContext, sink: UnarySink<R>, rsc: RpcStatusCode, details: St
     let rs = RpcStatus::new(rsc, Some(details));
     let f = sink
         .fail(rs)
-        .map_err(move |e| error!("failed to send response, the error is: {:?}", e))
+        .map_err(|e| error!("failed to send response, the error is: {:?}", e))
         .map(|_| ());
     ctx.spawn(f)
 }
@@ -45,13 +51,14 @@ impl Default for MockEtcd {
         Self::new()
     }
 }
+
 impl MockEtcd {
     /// Create `MockEtcd`
     #[must_use]
     #[inline]
     pub fn new() -> Self {
         Self {
-            map: Arc::new(RwLock::new(HashMap::<Vec<u8>, KeyValue>::new())),
+            map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -63,7 +70,6 @@ impl MockEtcd {
         let key = req.get_key().to_vec();
         let range_end = req.get_range_end().to_vec();
         let mut kvs = vec![];
-        //let hashmap = self.hashmap.lock().await;
         let map = map_arc.read().await;
         match range_end.as_slice() {
             [] => {
@@ -148,10 +154,7 @@ impl Kv for MockEtcd {
             let mut response = RangeResponse::new();
             response.set_count(kvs.len().cast());
             response.set_kvs(RepeatedField::from_vec(kvs));
-            sink.success(response)
-                .map_err(move |e| error!("failed to send response, the error is: {:?}", e))
-                .map(|_| ())
-                .await;
+            success(response, sink).await;
         };
 
         ctx.spawn(task)
@@ -171,13 +174,11 @@ impl Kv for MockEtcd {
             if let Some(kv) = prev {
                 response.set_prev_kv(kv);
             }
-            sink.success(response)
-                .map_err(move |e| error!("failed to send response, the error is: {:?}", e))
-                .map(|_| ())
-                .await;
+            success(response, sink).await;
         };
         ctx.spawn(task)
     }
+
     fn delete_range(
         &mut self,
         ctx: RpcContext,
@@ -199,10 +200,7 @@ impl Kv for MockEtcd {
             if get_prev {
                 response.set_prev_kvs(RepeatedField::from_vec(prev_kvs));
             }
-            sink.success(response)
-                .map_err(move |e| error!("failed to send response, the error is: {:?}", e))
-                .map(|_| ())
-                .await;
+            success(response, sink).await;
         };
         ctx.spawn(task)
     }
@@ -414,13 +412,14 @@ mod test {
             assert_eq!(mock_etcd.map.read().await.len(), 0);
         });
     }
+
     fn e2e_test() {
         let etcd_service = crate::etcd_grpc::create_kv(MockEtcd::new());
         let mut etcd_server = grpcio::ServerBuilder::new(Arc::new(Environment::new(1)))
             .register_service(etcd_service)
             .bind("127.0.0.1", 8888)
             .build()
-            .unwrap_or_else(|_| panic!("failed to build etcd server"));
+            .unwrap_or_else(|err| panic!("failed to build etcd server, the error is: {}", err));
         etcd_server.start();
 
         smol::future::block_on(Compat::new(async {
@@ -431,7 +430,9 @@ mod test {
                 tls: None,
             })
             .await
-            .unwrap_or_else(|_| panic!("failed to connect to etcd server"));
+            .unwrap_or_else(|err| {
+                panic!("failed to connect to etcd server, the error is: {}", err)
+            });
 
             let key000 = vec![0_u8, 0_u8, 0_u8];
             let key001 = vec![0_u8, 0_u8, 1_u8];
@@ -446,54 +447,70 @@ mod test {
                 .kv()
                 .put(PutRequest::new(key000.clone(), key000.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key000"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key000, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key001.clone(), key001.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key001"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key001, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key010.clone(), key010.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key010"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key010, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key011.clone(), key011.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key011"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key011, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key100.clone(), key100.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key100"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key100, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key101.clone(), key101.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key101"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key101, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key110.clone(), key110.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key110"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key110, the error is {}", err)
+                });
             client
                 .kv()
                 .put(PutRequest::new(key111.clone(), key111.clone()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to put key-value key111"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to put key-value key111, the error is {}", err)
+                });
 
             let resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::key(vec![0_u8])))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get key 0"));
+                .unwrap_or_else(|err| panic!("failed to get key 0, the error is {}", err));
             assert_eq!(resp.count(), 0);
             let mut resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::key(key000.clone())))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get key 000"));
+                .unwrap_or_else(|err| panic!("failed to get key 000, the error is {}", err));
             assert_eq!(resp.count(), 1);
             assert_eq!(resp.take_kvs().get(0).unwrap().value(), key000);
 
@@ -501,7 +518,7 @@ mod test {
                 .kv()
                 .range(RangeRequest::new(KeyRange::key(key111.clone())))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get key 111"));
+                .unwrap_or_else(|err| panic!("failed to get key 111, the error is {}", err));
             assert_eq!(resp.count(), 1);
             assert_eq!(resp.take_kvs().get(0).unwrap().value(), key111);
 
@@ -509,26 +526,26 @@ mod test {
                 .kv()
                 .range(RangeRequest::new(KeyRange::range(key000.clone(), key100)))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get range 000-100"));
+                .unwrap_or_else(|err| panic!("failed to get range 000-100, the error is {}", err));
             assert_eq!(resp.count(), 4);
             let resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::all()))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get range all"));
+                .unwrap_or_else(|err| panic!("failed to get range all, the error is {}", err));
             assert_eq!(resp.count(), 8);
             let resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get prefix 11"));
+                .unwrap_or_else(|err| panic!("failed to get prefix 11, the error is {}", err));
             assert_eq!(resp.count(), 2);
 
             let resp = client
                 .kv()
                 .delete(DeleteRequest::new(KeyRange::key(vec![0_u8])))
                 .await
-                .unwrap_or_else(|_| panic!("failed to delete key 0"));
+                .unwrap_or_else(|err| panic!("failed to delete key 0, the error is {}", err));
             assert_eq!(resp.count_deleted(), 0);
 
             let mut delete_req = DeleteRequest::new(KeyRange::key(key000.clone()));
@@ -537,28 +554,28 @@ mod test {
                 .kv()
                 .delete(delete_req)
                 .await
-                .unwrap_or_else(|_| panic!("failed to delete key 000"));
+                .unwrap_or_else(|err| panic!("failed to delete key 000, the error is {}", err));
             assert_eq!(resp.take_prev_kvs().get(0).unwrap().value(), key000);
 
             let resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::key(key000)))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get key 000"));
+                .unwrap_or_else(|err| panic!("failed to get key 000, the error is {}", err));
             assert_eq!(resp.count(), 0);
 
             let resp = client
                 .kv()
                 .delete(DeleteRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
                 .await
-                .unwrap_or_else(|_| panic!("failed to delete prefix 11"));
+                .unwrap_or_else(|err| panic!("failed to delete prefix 11, the error is {}", err));
             assert_eq!(resp.count_deleted(), 2);
 
             let resp = client
                 .kv()
                 .range(RangeRequest::new(KeyRange::key(key111.clone())))
                 .await
-                .unwrap_or_else(|_| panic!("failed to get key 111"));
+                .unwrap_or_else(|err| panic!("failed to get key 111, the error is {}", err));
             assert_eq!(resp.count(), 0);
         }));
     }
