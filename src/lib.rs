@@ -61,7 +61,6 @@ mod auth;
     clippy::cargo
 )]
 mod kv;
-
 // Ignore format and lint to generated code
 #[rustfmt::skip]
 #[allow(
@@ -85,5 +84,6 @@ mod etcd;
     clippy::cargo
 )]
 mod etcd_grpc;
+
 /// Mock etcd
 pub mod mock_etcd;
