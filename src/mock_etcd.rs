@@ -1,13 +1,15 @@
+//! The implementation for Mock Etcd
+
 use super::etcd::{
     CompactionRequest, CompactionResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
     PutResponse, RangeRequest, RangeResponse, TxnRequest, TxnResponse,
 };
-use super::etcd_grpc::Kv;
+use super::etcd_grpc::{create_kv, Kv};
 use super::kv::KeyValue;
 use async_lock::RwLock;
 use futures::future::TryFutureExt;
 use futures::prelude::*;
-use grpcio::{RpcContext, RpcStatus, RpcStatusCode, UnarySink};
+use grpcio::{Environment, RpcContext, RpcStatus, RpcStatusCode, Server, ServerBuilder, UnarySink};
 use log::{debug, error};
 use protobuf::RepeatedField;
 use std::collections::HashMap;
@@ -37,14 +39,7 @@ fn fail<R>(ctx: &RpcContext, sink: UnarySink<R>, rsc: RpcStatusCode, details: St
     ctx.spawn(f)
 }
 
-/// Mock Etcd
-#[derive(Debug, Clone)]
-pub struct MockEtcd {
-    /// map to store key value
-    map: Arc<RwLock<HashMap<Vec<u8>, KeyValue>>>,
-}
-
-impl Default for MockEtcd {
+impl Default for MockEtcdServer {
     #[must_use]
     #[inline]
     fn default() -> Self {
@@ -52,17 +47,57 @@ impl Default for MockEtcd {
     }
 }
 
-impl MockEtcd {
-    /// Create `MockEtcd`
+/// Mock Etcd Server
+#[derive(Debug)]
+pub struct MockEtcdServer {
+    /// grpc server
+    server: Server,
+}
+
+impl MockEtcdServer {
+    /// Create `MockEtcdServer`
     #[must_use]
     #[inline]
     pub fn new() -> Self {
+        let etcd_service = create_kv(MockEtcd::new());
+        Self {
+            server: ServerBuilder::new(Arc::new(Environment::new(1)))
+                .register_service(etcd_service)
+                .bind("127.0.0.1", 2379)
+                .build()
+                .unwrap_or_else(|e| panic!("failed to build etcd server, the error is: {:?}", e)),
+        }
+    }
+
+    /// Start Mock Etcd Server
+    #[inline]
+    pub fn start(&mut self) {
+        self.server.start();
+    }
+}
+
+/// Mock Etcd
+#[derive(Debug, Clone)]
+struct MockEtcd {
+    /// map to store key value
+    map: Arc<RwLock<HashMap<Vec<u8>, KeyValue>>>,
+}
+
+/// Range end to get all keys
+const ALL_KEYS: &[u8] = &[0_u8];
+/// Range end to get one key
+const ONE_KEY: &[u8] = &[];
+
+impl MockEtcd {
+    /// Create `MockEtcd`
+    fn new() -> Self {
         Self {
             map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Get values of keys from a `RangeRequest` to map
+    #[allow(clippy::pattern_type_mismatch)]
     async fn map_get(
         map_arc: Arc<RwLock<HashMap<Vec<u8>, KeyValue>>>,
         req: RangeRequest,
@@ -72,12 +107,12 @@ impl MockEtcd {
         let mut kvs = vec![];
         let map = map_arc.read().await;
         match range_end.as_slice() {
-            [] => {
+            ONE_KEY => {
                 if let Some(kv) = map.get(&key) {
                     kvs.push(kv.clone());
                 }
             }
-            [0_u8] => {
+            ALL_KEYS => {
                 if key == vec![0_u8] {
                     map.values().for_each(|v| kvs.push(v.clone()));
                 }
@@ -106,6 +141,7 @@ impl MockEtcd {
     }
 
     /// Delete keys from `DeleteRangeRequest` from map
+    #[allow(clippy::pattern_type_mismatch)]
     async fn map_delete(
         map_arc: Arc<RwLock<HashMap<Vec<u8>, KeyValue>>>,
         req: DeleteRangeRequest,
@@ -115,12 +151,12 @@ impl MockEtcd {
         let mut prev_kvs = vec![];
         let mut map = map_arc.write().await;
         match range_end.as_slice() {
-            [] => {
+            ONE_KEY => {
                 if let Some(kv) = map.remove(&key) {
                     prev_kvs.push(kv);
                 }
             }
-            [0_u8] => {
+            ALL_KEYS => {
                 if key == vec![0_u8] {
                     map.values().for_each(|v| prev_kvs.push(v.clone()));
                     map.clear()
@@ -233,10 +269,9 @@ impl Kv for MockEtcd {
 #[allow(clippy::all, clippy::restriction)]
 #[allow(clippy::too_many_lines)]
 mod test {
-    use crate::mock_etcd::MockEtcd;
+    use crate::mock_etcd::{MockEtcd, MockEtcdServer};
     use async_compat::Compat;
     use etcd_rs::{Client, ClientConfig, DeleteRequest, KeyRange, PutRequest, RangeRequest};
-    use grpcio::Environment;
     use std::sync::Arc;
     #[test]
     fn test_all() {
@@ -414,16 +449,11 @@ mod test {
     }
 
     fn e2e_test() {
-        let etcd_service = crate::etcd_grpc::create_kv(MockEtcd::new());
-        let mut etcd_server = grpcio::ServerBuilder::new(Arc::new(Environment::new(1)))
-            .register_service(etcd_service)
-            .bind("127.0.0.1", 8888)
-            .build()
-            .unwrap_or_else(|err| panic!("failed to build etcd server, the error is: {}", err));
+        let mut etcd_server = MockEtcdServer::new();
         etcd_server.start();
 
         smol::future::block_on(Compat::new(async {
-            let endpoints = vec!["http://127.0.0.1:8888".to_owned()];
+            let endpoints = vec!["http://127.0.0.1:2379".to_owned()];
             let client = Client::connect(ClientConfig {
                 endpoints,
                 auth: None,
