@@ -1,10 +1,10 @@
 [package]
-name = "mock-etcd-service"
+name = "mock-etcd"
 version = "0.1.0"
 authors = ["Zheng Pan <zhengpan@google.com>"]
 edition = "2018"
 keywords = ["etcd"]
-repository = "https://github.com/datenlord/mock-etcd-service"
+repository = "https://github.com/datenlord/mock-etcd"
 description = "mock etcd"
 license = "MIT"
 categories = ["storage"]
