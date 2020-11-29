@@ -85,5 +85,7 @@ mod etcd;
 )]
 mod etcd_grpc;
 
-/// Mock etcd
-pub mod mock_etcd;
+mod mock_etcd;
+
+/// Mock etcd server
+pub use crate::mock_etcd::MockEtcdServer;
