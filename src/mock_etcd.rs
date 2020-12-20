@@ -178,7 +178,7 @@ impl MockEtcd {
 }
 
 impl Kv for MockEtcd {
-    fn range(&mut self, ctx: RpcContext, req: RangeRequest, sink: UnarySink<RangeResponse>) {
+    fn range(&mut self, _ctx: RpcContext, req: RangeRequest, sink: UnarySink<RangeResponse>) {
         debug!(
             "Receive range request key={:?}, range_end={:?}",
             req.get_key(),
@@ -193,10 +193,10 @@ impl Kv for MockEtcd {
             success(response, sink).await;
         };
 
-        ctx.spawn(task)
+        smol::spawn(task).detach();
     }
 
-    fn put(&mut self, ctx: RpcContext, req: PutRequest, sink: UnarySink<PutResponse>) {
+    fn put(&mut self, _ctx: RpcContext, req: PutRequest, sink: UnarySink<PutResponse>) {
         debug!(
             "Receive put request key={:?}, value={:?}",
             req.get_key(),
@@ -212,12 +212,12 @@ impl Kv for MockEtcd {
             }
             success(response, sink).await;
         };
-        ctx.spawn(task)
+        smol::spawn(task).detach();
     }
 
     fn delete_range(
         &mut self,
-        ctx: RpcContext,
+        _ctx: RpcContext,
         req: DeleteRangeRequest,
         sink: UnarySink<DeleteRangeResponse>,
     ) {
@@ -238,7 +238,7 @@ impl Kv for MockEtcd {
             }
             success(response, sink).await;
         };
-        ctx.spawn(task)
+        smol::spawn(task).detach();
     }
 
     fn txn(&mut self, ctx: RpcContext, _req: TxnRequest, sink: UnarySink<TxnResponse>) {
