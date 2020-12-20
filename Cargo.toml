@@ -17,6 +17,7 @@ grpcio = { version = "0.7.0", default-features = false, features = ["protobuf-co
 log = "0.4.11"
 protobuf = "2.16.2"
 utilities = { git = "https://github.com/datenlord/utilities", rev = "4ef408d" }
+smol = { version = "1.2.5" }
 
 
 [build-dependencies]
@@ -24,5 +25,4 @@ protoc-grpcio = "2.0.0"
 
 [dev-dependencies]
 etcd-rs = "0.3.0"
-smol = { version = "1.2.4" }
 async-compat = "0.1.4"
