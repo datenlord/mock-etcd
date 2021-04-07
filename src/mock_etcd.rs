@@ -327,45 +327,59 @@ impl Watch for MockEtcd {
         let task = async move {
             let sink_arc = Arc::new(Mutex::new(sink));
             while let Some(request) = stream.next().await {
-                if let Ok(watch_request) = request {
-                    if watch_request.has_create_request() {
-                        let key_range = KeyRange {
-                            key: watch_request.get_create_request().get_key().to_vec(),
-                            range_end: watch_request.get_create_request().get_range_end().to_vec(),
-                        };
-                        let watch_id = WATCH_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                match request {
+                    Ok(watch_request) => {
+                        if watch_request.has_create_request() {
+                            let key_range = KeyRange {
+                                key: watch_request.get_create_request().get_key().to_vec(),
+                                range_end: watch_request
+                                    .get_create_request()
+                                    .get_range_end()
+                                    .to_vec(),
+                            };
+                            let watch_id = WATCH_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                            watch_arc.write().await.insert(watch_id, key_range);
+                            watch_response_sender_arc
+                                .write()
+                                .await
+                                .insert(watch_id, Arc::clone(&sink_arc));
+                            let mut response = WatchResponse::new();
+                            response.set_watch_id(watch_id);
+                            response.set_created(true);
 
-                        watch_arc.write().await.insert(watch_id, key_range);
-                        watch_response_sender_arc
-                            .write()
-                            .await
-                            .insert(watch_id, Arc::clone(&sink_arc));
-                        let mut response = WatchResponse::new();
-                        response.set_watch_id(watch_id);
-                        response.set_created(true);
+                            sink_arc
+                                .lock()
+                                .await
+                                .send((response, WriteFlags::default()))
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("Fail to send watch response, the error is {}", e)
+                                });
+                        } else {
+                            let watch_id = watch_request.get_cancel_request().get_watch_id();
+                            watch_arc.write().await.remove(&watch_id);
+                            watch_response_sender_arc.write().await.remove(&watch_id);
 
-                        sink_arc
-                            .lock()
-                            .await
-                            .send((response, WriteFlags::default()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                panic!("Fail to send watch response, the error is {}", e)
-                            });
-                    } else {
-                        let watch_id = watch_request.get_cancel_request().get_watch_id();
-                        watch_arc.write().await.remove(&watch_id);
-                        watch_response_sender_arc.write().await.remove(&watch_id);
+                            let mut response = WatchResponse::new();
+                            response.set_watch_id(watch_id);
+                            response.set_canceled(true);
+
+                            sink_arc
+                                .lock()
+                                .await
+                                .send((response, WriteFlags::default()))
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("Fail to send watch response, the error is {}", e)
+                                });
+                        }
+                    }
+                    Err(e) => {
+                        error!("Fail to receive watch request, the error is: {}", e);
+                        break;
                     }
                 }
             }
-
-            sink_arc
-                .lock()
-                .await
-                .close()
-                .await
-                .unwrap_or_else(|e| error!("Fail to close watch stream, the error is {:?}", e));
         };
 
         smol::spawn(task).detach();
