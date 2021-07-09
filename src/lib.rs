@@ -84,6 +84,28 @@ mod etcd;
     clippy::cargo
 )]
 mod etcd_grpc;
+// Ignore format and lint to generated code
+#[rustfmt::skip]
+#[allow(
+    unreachable_pub,
+    clippy::all,
+    clippy::restriction,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+mod lock_grpc;
+// Ignore format and lint to generated code
+#[rustfmt::skip]
+#[allow(
+    unreachable_pub,
+    clippy::all,
+    clippy::restriction,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+mod lock;
 
 mod mock_etcd;
 

@@ -1,11 +1,17 @@
 //! The implementation for Mock Etcd
 
 use super::etcd::{
-    CompactionRequest, CompactionResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse, TxnRequest, TxnResponse, WatchRequest, WatchResponse,
+    CompactionRequest, CompactionResponse, DeleteRangeRequest, DeleteRangeResponse,
+    LeaseGrantRequest, LeaseGrantResponse, LeaseKeepAliveRequest, LeaseKeepAliveResponse,
+    LeaseRevokeRequest, LeaseRevokeResponse, LeaseTimeToLiveRequest, LeaseTimeToLiveResponse,
+    PutRequest, PutResponse, RangeRequest, RangeResponse, TxnRequest, TxnResponse, WatchRequest,
+    WatchResponse,
 };
-use super::etcd_grpc::{create_kv, create_watch, Kv, Watch};
+use super::etcd_grpc::{create_kv, create_lease, create_watch, Kv, Lease, Watch};
 use super::kv::{Event, Event_EventType, KeyValue};
+use super::lock::{LockRequest, LockResponse, UnlockRequest, UnlockResponse};
+use super::lock_grpc::{create_lock, Lock};
+use async_io::Timer;
 use async_lock::RwLock;
 use futures::future::TryFutureExt;
 use futures::prelude::*;
@@ -16,9 +22,10 @@ use grpcio::{
 use log::{debug, error};
 use protobuf::RepeatedField;
 use smol::lock::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use utilities::Cast;
 
 /// Help function to send success `gRPC` response
@@ -66,11 +73,15 @@ impl MockEtcdServer {
     pub fn new() -> Self {
         let mock_etcd = MockEtcd::new();
         let etcd_service = create_kv(mock_etcd.clone());
-        let etcd_watch_service = create_watch(mock_etcd);
+        let etcd_watch_service = create_watch(mock_etcd.clone());
+        let etcd_lock_service = create_lock(mock_etcd.clone());
+        let etcd_lease_service = create_lease(mock_etcd);
         Self {
             server: ServerBuilder::new(Arc::new(Environment::new(1)))
                 .register_service(etcd_service)
                 .register_service(etcd_watch_service)
+                .register_service(etcd_lock_service)
+                .register_service(etcd_lease_service)
                 .bind("127.0.0.1", 2379)
                 .build()
                 .unwrap_or_else(|e| panic!("failed to build etcd server, the error is: {:?}", e)),
@@ -103,6 +114,9 @@ struct MockEtcd {
 
     /// map to store watch id and watch response senders
     watch_response_sender: Arc<RwLock<HashMap<i64, LockedDuplexSink>>>,
+
+    /// set to store lock name
+    lock_map: Arc<RwLock<HashSet<Vec<u8>>>>,
 }
 
 /// A locked `DuplexSink` for watch response
@@ -123,6 +137,7 @@ impl MockEtcd {
             map: Arc::new(RwLock::new(HashMap::new())),
             watch: Arc::new(RwLock::new(HashMap::new())),
             watch_response_sender: Arc::new(RwLock::new(HashMap::new())),
+            lock_map: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -460,7 +475,7 @@ impl Kv for MockEtcd {
             &ctx,
             sink,
             RpcStatusCode::UNIMPLEMENTED,
-            "Not Implemented".to_string(),
+            "Not Implemented".to_owned(),
         )
     }
 
@@ -474,7 +489,111 @@ impl Kv for MockEtcd {
             &ctx,
             sink,
             RpcStatusCode::UNIMPLEMENTED,
-            "Not Implemented".to_string(),
+            "Not Implemented".to_owned(),
+        )
+    }
+}
+
+impl Lock for MockEtcd {
+    fn lock(&mut self, _ctx: RpcContext, req: LockRequest, sink: UnarySink<LockResponse>) {
+        debug!("Receive lock request key={:?}", req.get_name(),);
+        let map_arc = Arc::clone(&self.lock_map);
+        let task = async move {
+            loop {
+                let mut map = map_arc.write().await;
+                if map.contains(req.get_name()) {
+                    Timer::after(Duration::from_secs(1)).await;
+                    drop(map);
+                } else {
+                    map.insert(req.get_name().to_vec());
+                    drop(map);
+                    let mut response = LockResponse::new();
+                    response.set_key(req.get_name().to_vec());
+                    success(response, sink).await;
+                    break;
+                }
+            }
+        };
+
+        smol::spawn(task).detach();
+    }
+
+    fn unlock(&mut self, _ctx: RpcContext, req: UnlockRequest, sink: UnarySink<UnlockResponse>) {
+        debug!("Receive unlock request key={:?}", req.get_key(),);
+        let map_arc = Arc::clone(&self.lock_map);
+        let task = async move {
+            let mut map = map_arc.write().await;
+            if map.contains(req.get_key()) {
+                map.remove(req.get_key());
+            } else {
+            }
+            drop(map);
+            let response = UnlockResponse::new();
+            success(response, sink).await;
+        };
+
+        smol::spawn(task).detach();
+    }
+}
+
+impl Lease for MockEtcd {
+    fn lease_grant(
+        &mut self,
+        _ctx: RpcContext,
+        _req: LeaseGrantRequest,
+        sink: UnarySink<LeaseGrantResponse>,
+    ) {
+        let task = async move {
+            let mut response = LeaseGrantResponse::new();
+            response.set_ID(1);
+            success(response, sink).await;
+        };
+
+        smol::spawn(task).detach();
+    }
+
+    fn lease_revoke(
+        &mut self,
+        ctx: RpcContext,
+        _req: LeaseRevokeRequest,
+        sink: UnarySink<LeaseRevokeResponse>,
+    ) {
+        fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            "Not Implemented".to_owned(),
+        )
+    }
+
+    fn lease_keep_alive(
+        &mut self,
+        ctx: RpcContext,
+        _req: RequestStream<LeaseKeepAliveRequest>,
+        sink: DuplexSink<LeaseKeepAliveResponse>,
+    ) {
+        let rs = RpcStatus::new(
+            RpcStatusCode::UNIMPLEMENTED,
+            Some("Not Implemented".to_owned()),
+        );
+        let f = sink
+            .fail(rs)
+            .map_err(|e| error!("failed to send response, the error is: {:?}", e))
+            .map(|_| ());
+        ctx.spawn(f)
+    }
+
+    fn lease_time_to_live(
+        &mut self,
+        ctx: RpcContext,
+        _req: LeaseTimeToLiveRequest,
+        sink: UnarySink<LeaseTimeToLiveResponse>,
+    ) {
+        fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            "Not Implemented".to_owned(),
         )
     }
 }
@@ -484,8 +603,10 @@ impl Kv for MockEtcd {
 #[allow(clippy::too_many_lines)]
 mod test {
     use crate::mock_etcd::{MockEtcd, MockEtcdServer};
-    use async_compat::Compat;
-    use etcd_rs::{Client, ClientConfig, DeleteRequest, KeyRange, PutRequest, RangeRequest};
+    use etcd_client::{
+        Client, ClientConfig, EtcdDeleteRequest, EtcdLeaseGrantRequest, EtcdLockRequest,
+        EtcdPutRequest, EtcdRangeRequest, EtcdUnlockRequest, KeyRange,
+    };
     use futures::StreamExt;
     use std::sync::Arc;
     #[test]
@@ -493,6 +614,7 @@ mod test {
         unit_test();
         e2e_test();
         e2e_watch_test();
+        e2e_lock_lease_test();
     }
     fn unit_test() {
         smol::future::block_on(async {
@@ -743,12 +865,13 @@ mod test {
         let mut etcd_server = MockEtcdServer::new();
         etcd_server.start();
 
-        smol::future::block_on(Compat::new(async {
-            let endpoints = vec!["http://127.0.0.1:2379".to_owned()];
+        smol::future::block_on(async {
+            let endpoints = vec!["127.0.0.1:2379".to_owned()];
             let client = Client::connect(ClientConfig {
                 endpoints,
                 auth: None,
-                tls: None,
+                cache_enable: false,
+                cache_size: 0,
             })
             .await
             .unwrap_or_else(|err| {
@@ -766,56 +889,56 @@ mod test {
 
             client
                 .kv()
-                .put(PutRequest::new(key000.clone(), key000.clone()))
+                .put(EtcdPutRequest::new(key000.clone(), key000.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key000, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key001.clone(), key001.clone()))
+                .put(EtcdPutRequest::new(key001.clone(), key001.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key001, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key010.clone(), key010.clone()))
+                .put(EtcdPutRequest::new(key010.clone(), key010.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key010, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key011.clone(), key011.clone()))
+                .put(EtcdPutRequest::new(key011.clone(), key011.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key011, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key100.clone(), key100.clone()))
+                .put(EtcdPutRequest::new(key100.clone(), key100.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key100, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key101.clone(), key101.clone()))
+                .put(EtcdPutRequest::new(key101.clone(), key101.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key101, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key110.clone(), key110.clone()))
+                .put(EtcdPutRequest::new(key110.clone(), key110.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key110, the error is {}", err)
                 });
             client
                 .kv()
-                .put(PutRequest::new(key111.clone(), key111.clone()))
+                .put(EtcdPutRequest::new(key111.clone(), key111.clone()))
                 .await
                 .unwrap_or_else(|err| {
                     panic!("failed to put key-value key111, the error is {}", err)
@@ -823,13 +946,13 @@ mod test {
 
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::key(vec![0_u8])))
+                .range(EtcdRangeRequest::new(KeyRange::key(vec![0_u8])))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get key 0, the error is {}", err));
             assert_eq!(resp.count(), 0);
             let mut resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::key(key000.clone())))
+                .range(EtcdRangeRequest::new(KeyRange::key(key000.clone())))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get key 000, the error is {}", err));
             assert_eq!(resp.count(), 1);
@@ -837,7 +960,7 @@ mod test {
 
             let mut resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::key(key111.clone())))
+                .range(EtcdRangeRequest::new(KeyRange::key(key111.clone())))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get key 111, the error is {}", err));
             assert_eq!(resp.count(), 1);
@@ -845,31 +968,34 @@ mod test {
 
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::range(key000.clone(), key100)))
+                .range(EtcdRangeRequest::new(KeyRange::range(
+                    key000.clone(),
+                    key100,
+                )))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get range 000-100, the error is {}", err));
             assert_eq!(resp.count(), 4);
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::all()))
+                .range(EtcdRangeRequest::new(KeyRange::all()))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get range all, the error is {}", err));
             assert_eq!(resp.count(), 8);
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
+                .range(EtcdRangeRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get prefix 11, the error is {}", err));
             assert_eq!(resp.count(), 2);
 
             let resp = client
                 .kv()
-                .delete(DeleteRequest::new(KeyRange::key(vec![0_u8])))
+                .delete(EtcdDeleteRequest::new(KeyRange::key(vec![0_u8])))
                 .await
                 .unwrap_or_else(|err| panic!("failed to delete key 0, the error is {}", err));
             assert_eq!(resp.count_deleted(), 0);
 
-            let mut delete_req = DeleteRequest::new(KeyRange::key(key000.clone()));
+            let mut delete_req = EtcdDeleteRequest::new(KeyRange::key(key000.clone()));
             delete_req.set_prev_kv(true);
             let mut resp = client
                 .kv()
@@ -880,37 +1006,38 @@ mod test {
 
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::key(key000)))
+                .range(EtcdRangeRequest::new(KeyRange::key(key000)))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get key 000, the error is {}", err));
             assert_eq!(resp.count(), 0);
 
             let resp = client
                 .kv()
-                .delete(DeleteRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
+                .delete(EtcdDeleteRequest::new(KeyRange::prefix(vec![1_u8, 1_u8])))
                 .await
                 .unwrap_or_else(|err| panic!("failed to delete prefix 11, the error is {}", err));
             assert_eq!(resp.count_deleted(), 2);
 
             let resp = client
                 .kv()
-                .range(RangeRequest::new(KeyRange::key(key111.clone())))
+                .range(EtcdRangeRequest::new(KeyRange::key(key111.clone())))
                 .await
                 .unwrap_or_else(|err| panic!("failed to get key 111, the error is {}", err));
             assert_eq!(resp.count(), 0);
-        }));
+        });
     }
 
     fn e2e_watch_test() {
         let mut etcd_server = MockEtcdServer::new();
         etcd_server.start();
 
-        smol::future::block_on(Compat::new(async {
-            let endpoints = vec!["http://127.0.0.1:2379".to_owned()];
+        smol::future::block_on(async {
+            let endpoints = vec!["127.0.0.1:2379".to_owned()];
             let client = Client::connect(ClientConfig {
                 endpoints,
                 auth: None,
-                tls: None,
+                cache_enable: false,
+                cache_size: 0,
             })
             .await
             .unwrap_or_else(|err| {
@@ -938,12 +1065,12 @@ mod test {
             for key in test_data {
                 client
                     .kv()
-                    .put(PutRequest::new(key.clone(), key.clone()))
+                    .put(EtcdPutRequest::new(key.clone(), key.clone()))
                     .await
                     .unwrap_or_else(|err| panic!("failed to put key-value, the error is {}", err));
             }
 
-            let mut delete_req = DeleteRequest::new(KeyRange::key(key000.clone()));
+            let mut delete_req = EtcdDeleteRequest::new(KeyRange::key(key000.clone()));
             delete_req.set_prev_kv(true);
             let mut resp = client
                 .kv()
@@ -980,6 +1107,59 @@ mod test {
                     assert!((kv == key000.clone()) || (kv == key001.clone()));
                 }
             }
-        }));
+        });
+    }
+
+    fn e2e_lock_lease_test() {
+        let mut etcd_server = MockEtcdServer::new();
+        etcd_server.start();
+
+        smol::future::block_on(async {
+            let endpoints = vec!["127.0.0.1:2379".to_owned()];
+            let client = Client::connect(ClientConfig {
+                endpoints,
+                auth: None,
+                cache_enable: false,
+                cache_size: 0,
+            })
+            .await
+            .unwrap_or_else(|err| {
+                panic!("failed to connect to etcd server, the error is: {}", err)
+            });
+
+            let lock_key012 = vec![0_u8, 1_u8, 2_u8];
+
+            let mut res = client
+                .lock()
+                .lock(EtcdLockRequest::new(lock_key012.clone(), 10))
+                .await
+                .unwrap_or_else(|err| panic!("failed to lock key012, the error is {}", err));
+            assert_eq!(res.take_key(), lock_key012);
+            client
+                .lock()
+                .unlock(EtcdUnlockRequest::new(lock_key012.clone()))
+                .await
+                .unwrap_or_else(|err| panic!("failed to get key 0, the error is {}", err));
+            let mut res = client
+                .lock()
+                .lock(EtcdLockRequest::new(lock_key012.clone(), 10))
+                .await
+                .unwrap_or_else(|err| panic!("failed to lock key012, the error is {}", err));
+            assert_eq!(res.take_key(), lock_key012);
+            client
+                .lock()
+                .unlock(EtcdUnlockRequest::new(lock_key012.clone()))
+                .await
+                .unwrap_or_else(|err| panic!("failed to get key 0, the error is {}", err));
+
+            let res = client
+                .lease()
+                .grant(EtcdLeaseGrantRequest::new(std::time::Duration::from_secs(
+                    10,
+                )))
+                .await
+                .unwrap_or_else(|err| panic!("failed to get key 0, the error is {}", err));
+            assert_eq!(res.id(), 1);
+        });
     }
 }
